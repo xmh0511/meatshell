@@ -199,6 +199,15 @@ fn apply_window_chrome(window: &slint::Window) {
             subclass_id: usize,
             ref_data: usize,
         ) -> i32;
+        fn SetWindowPos(
+            hwnd: isize,
+            hwnd_insert_after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
     }
     #[link(name = "comctl32")]
     extern "system" {
@@ -236,6 +245,24 @@ fn apply_window_chrome(window: &slint::Window) {
             // Install a window subclass that intercepts WM_NCCALCSIZE to
             // eliminate the invisible non-client border (#195).
             SetWindowSubclass(hwnd, nccalcsize_subclass as isize, 1, 0);
+            // Force Windows to re-send WM_NCCALCSIZE immediately so the new
+            // handler takes effect right now, not only on the next resize.
+            // Without SWP_FRAMECHANGED the invisible border persists until the
+            // user drags the window edge, leaving click coordinates offset.
+            const SWP_NOSIZE: u32 = 0x0001;
+            const SWP_NOMOVE: u32 = 0x0002;
+            const SWP_NOZORDER: u32 = 0x0004;
+            const SWP_NOACTIVATE: u32 = 0x0010;
+            const SWP_FRAMECHANGED: u32 = 0x0020;
+            SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
 
             // ---- DWM chrome (rounded corners + shadow on Win11+) ----
             const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
