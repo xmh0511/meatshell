@@ -22,12 +22,12 @@ fn main() {
         println!("cargo:rerun-if-changed=assets/meatshell.exe.manifest");
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/meatshell.ico");
-        // Embed an application manifest declaring Per-Monitor DPI Awareness V2.
-        // Without it the DPI-awareness level depends on winit's runtime
-        // SetProcessDpiAwarenessContext call, which races: if anything touches a
-        // DPI API first the call silently fails and the window jumps in size /
-        // cursor offset when dragged across monitors with different scaling (#194).
-        // The manifest is authoritative and applied before any code runs.
+        // Embed the application manifest (supportedOS + trustInfo).
+        // DPI awareness is NOT declared here — it's set at runtime by winit
+        // via SetProcessDpiAwarenessContext. Declaring PerMonitorV2 in the
+        // manifest caused a Y-axis click offset on Windows 10 because it
+        // changed how the WS_THICKFRAME invisible border is positioned
+        // relative to the window bounds (#195).
         res.set_manifest_file("assets/meatshell.exe.manifest");
         if let Err(e) = res.compile() {
             println!("cargo:warning=failed to embed Windows icon: {e}");

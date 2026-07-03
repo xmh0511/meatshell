@@ -161,85 +161,38 @@ fn set_window_icon(window: &AppWindow) {
         .with_winit_window(|ww| ww.set_window_icon(Some(icon)));
 }
 
-/// On Windows, subclass the HWND so that `WM_NCCALCSIZE` always returns the
-/// full window as the client area. This eliminates the invisible non-client
-/// border that `WS_THICKFRAME` adds (even when winit recreates the style),
-/// which would otherwise shift Slint's rendering vs. click coordinates (#195).
-/// On Windows 11+ the DWMWA_WINDOW_CORNER_PREFERENCE attribute gives native
-/// rounded corners and a drop shadow (#162/#166); on Windows 10 those are
-/// skipped (the attribute is unsupported) to keep coordinates clean.
+/// On Windows 11, give the frameless window the native rounded corners (#166)
+/// and drop shadow (#162) it otherwise loses by drawing its own title bar.
+/// Harmless on Windows 10 (the corner attribute is ignored) and a no-op
+/// elsewhere.
 #[cfg(windows)]
 fn apply_window_chrome(window: &slint::Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    // ---- Win32 constants & FFI ----
-    #[repr(C)]
-    struct Margins {
-        left: i32,
-        right: i32,
-        top: i32,
-        bottom: i32,
-    }
-
-    #[link(name = "dwmapi")]
-    extern "system" {
-        fn DwmSetWindowAttribute(
-            hwnd: isize,
-            attr: u32,
-            pv: *const core::ffi::c_void,
-            cb: u32,
-        ) -> i32;
-        fn DwmExtendFrameIntoClientArea(hwnd: isize, margins: *const Margins) -> i32;
-    }
-    #[link(name = "user32")]
-    extern "system" {
-        fn SetWindowSubclass(
-            hwnd: isize,
-            subclass_proc: isize,
-            subclass_id: usize,
-            ref_data: usize,
-        ) -> i32;
-    }
-    #[link(name = "comctl32")]
-    extern "system" {
-        fn DefSubclassProc(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
-    }
-
-    const WM_NCCALCSIZE: u32 = 0x0083;
-
-    unsafe extern "system" fn nccalcsize_subclass(
-        hwnd: isize,
-        msg: u32,
-        wparam: usize,
-        lparam: isize,
-        _subclass_id: usize,
-        _ref_data: usize,
-    ) -> isize {
-        if msg == WM_NCCALCSIZE && wparam != 0 {
-            // Return 0 → "the entire window is the client area", eliminating
-            // the invisible WS_THICKFRAME border that causes click offsets.
-            return 0;
-        }
-        DefSubclassProc(hwnd, msg, wparam, lparam)
-    }
-
     window.with_winit_window(|ww| {
-        let Ok(handle) = ww.window_handle() else {
-            return;
-        };
-        let RawWindowHandle::Win32(h) = handle.as_raw() else {
-            return;
-        };
+        let Ok(handle) = ww.window_handle() else { return };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
         let hwnd = h.hwnd.get();
 
+        #[repr(C)]
+        struct Margins {
+            left: i32,
+            right: i32,
+            top: i32,
+            bottom: i32,
+        }
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmSetWindowAttribute(
+                hwnd: isize,
+                attr: u32,
+                pv: *const core::ffi::c_void,
+                cb: u32,
+            ) -> i32;
+            fn DwmExtendFrameIntoClientArea(hwnd: isize, margins: *const Margins) -> i32;
+        }
+        const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+        const DWMWCP_ROUND: u32 = 2;
         unsafe {
-            // Install a window subclass that intercepts WM_NCCALCSIZE to
-            // eliminate the invisible non-client border (#195).
-            SetWindowSubclass(hwnd, nccalcsize_subclass as isize, 1, 0);
-
-            // ---- DWM chrome (rounded corners + shadow on Win11+) ----
-            const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-            const DWMWCP_ROUND: u32 = 2;
             let pref: u32 = DWMWCP_ROUND;
             let corner_hr = DwmSetWindowAttribute(
                 hwnd,
@@ -248,16 +201,15 @@ fn apply_window_chrome(window: &slint::Window) {
                 4,
             );
             if corner_hr == 0 {
-                let m = Margins {
-                    left: 1,
-                    right: 1,
-                    top: 1,
-                    bottom: 1,
-                };
+                let m = Margins { left: 1, right: 1, top: 1, bottom: 1 };
                 let shadow_hr = DwmExtendFrameIntoClientArea(hwnd, &m);
-                tracing::debug!("window chrome (Win11+): hwnd={hwnd:#x} shadow={shadow_hr:#x}");
+                tracing::debug!(
+                    "window chrome applied: hwnd={hwnd:#x} corner_hr={corner_hr:#x} shadow_hr={shadow_hr:#x}"
+                );
             } else {
-                tracing::debug!("window chrome (Win10): hwnd={hwnd:#x} subclass installed",);
+                tracing::debug!(
+                    "window chrome skipped (Win10): hwnd={hwnd:#x} corner_hr={corner_hr:#x}"
+                );
             }
         }
     });
