@@ -1945,6 +1945,7 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path
     };
     if let Ok(handles) = sftp_handles.lock() {
         if let Some(h) = handles.get(&active) {
+            win.set_download_open(true);
             h.upload(path.clone(), dir);
         }
         if sync {

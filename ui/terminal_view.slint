@@ -268,10 +268,12 @@ export component TerminalView inherits Rectangle {
     // columns reflows the vt100 screen and destroys the scrollback, so when you
     // switch back the output is gone.  Guarding on `visible` keeps each hidden
     // session frozen at its real size; `changed visible` re-syncs on return.
-    changed term-cols => { if (root.visible) { root.terminal-resize(root.term-cols, root.term-rows); } }
-    changed term-rows => { if (root.visible) { root.terminal-resize(root.term-cols, root.term-rows); } }
+    property <bool> has-real-size: root.width >= 80px && key-capture.height >= 80px;
+    changed term-cols => { if (root.visible && root.has-real-size) { root.terminal-resize(root.term-cols, root.term-rows); } }
+    changed term-rows => { if (root.visible && root.has-real-size) { root.terminal-resize(root.term-cols, root.term-rows); } }
+    changed has-real-size => { if (root.visible && root.has-real-size) { root.terminal-resize(root.term-cols, root.term-rows); } }
 
-    init => { root.terminal-resize(root.term-cols, root.term-rows); }
+    init => { if (root.has-real-size) { root.terminal-resize(root.term-cols, root.term-rows); } }
 
     changed spans => {
         // Bash: keep the latest output pinned to the bottom.
@@ -305,7 +307,9 @@ export component TerminalView inherits Rectangle {
         if (self.visible) {
             root.focus-pending = true;
             // Re-sync the PTY size on return (it was frozen while hidden).
-            root.terminal-resize(root.term-cols, root.term-rows);
+            if (root.has-real-size) {
+                root.terminal-resize(root.term-cols, root.term-rows);
+            }
         }
     }
 

@@ -1150,8 +1150,10 @@ export component AppWindow inherits Window {
             // tab strip + active terminal / welcome. Rust flattens the split tree
             // into `panes` for the size we report here.
             pane-area := Rectangle {
-            changed width => { root.content-resized(self.width, self.height); }
-            changed height => { root.content-resized(self.width, self.height); }
+                width: parent.width;
+                height: parent.height;
+                changed width => { root.content-resized(self.width, self.height); }
+                changed height => { root.content-resized(self.width, self.height); }
             for pane[pi] in root.panes : Rectangle {
                 x: pane.x; y: pane.y; width: pane.w; height: pane.h;
                 clip: true;
