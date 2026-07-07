@@ -6757,11 +6757,21 @@ fn wire_key_input(
         window.on_find_query_changed(move |tab_id: SharedString, query: SharedString| {
             let tid = tab_id.to_string();
             let q = query.to_string();
-            let matches = with_term_buf(&bufs_find, &tid, |buf| {
+            let (matches, jumped) = with_term_buf(&bufs_find, &tid, |buf| {
                 buf.find_query = q.clone();
-                compute_find_matches(&buf.displayed_text, &q)
+                let mut matches = compute_find_matches(&buf.displayed_text, &q);
+                let jumped = matches.is_empty() && buf.scroll_to_first_find_match(&q);
+                if jumped {
+                    buf.render();
+                    matches = compute_find_matches(&buf.displayed_text, &q);
+                }
+                (matches, jumped)
             }).unwrap_or_default();
             if let Some(win) = weak.upgrade() {
+                if jumped {
+                    rebuild_tab_display(&win, &bufs_find, &tid);
+                    return;
+                }
                 let model = ModelRc::from(Rc::new(VecModel::from(matches)));
                 set_terminal_row(&win, &tid, |row| {
                     row.find_matches = model.clone();
@@ -7899,6 +7909,36 @@ impl TermBuffer {
             });
         }
         out
+    }
+
+    /// If the current find query is outside the visible window, jump to the
+    /// first matching row in scrollback/live content so old serial output can be
+    /// found without manually scrolling back first (#233).
+    fn scroll_to_first_find_match(&mut self, query: &str) -> bool {
+        if query.is_empty() || self.parser.screen().alternate_screen() {
+            return false;
+        }
+        let q = query.to_lowercase();
+        let (live, _) = self.live_rows();
+        let rows = self.parser.screen().size().0 as usize;
+        let hist_len = self.history.len();
+        let combined_len = hist_len + live.len();
+        let Some(match_idx) = self
+            .history
+            .iter()
+            .map(|line| &line.0)
+            .chain(live.iter().map(|line| &line.0))
+            .position(|line| line.to_lowercase().contains(&q))
+        else {
+            return false;
+        };
+        let top = match_idx.min(combined_len.saturating_sub(rows));
+        let new_offset = combined_len.saturating_sub(rows + top);
+        if self.view_offset == new_offset {
+            return false;
+        }
+        self.view_offset = new_offset;
+        true
     }
 
     /// Extract the selected text from the combined buffer (whole selection,
