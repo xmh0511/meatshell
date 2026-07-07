@@ -133,6 +133,14 @@ use crate::ssh::{
 };
 use crate::system::{format_bytes_per_sec, format_mem, SystemSampler, SystemSnapshot};
 
+fn tab_title_len(title: &str) -> i32 {
+    title
+        .chars()
+        .map(|ch| if ch.is_ascii() { 1usize } else { 2usize })
+        .sum::<usize>()
+        .min(i32::MAX as usize) as i32
+}
+
 type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
 /// Per-tab flag: once the user explicitly navigates via the SFTP tree or
 /// toolbar, stop auto-syncing to the terminal's `cd` path.
@@ -1070,6 +1078,7 @@ pub fn run() -> Result<()> {
     let tabs_model: Rc<VecModel<TabInfo>> = Rc::new(VecModel::default());
     tabs_model.push(TabInfo {
         id: "welcome".into(),
+        title_len: tab_title_len(&t("新标签页", "New tab")),
         title: t("新标签页", "New tab").into(),
         kind: "welcome".into(),
         connected: false,
@@ -1265,6 +1274,7 @@ pub fn run() -> Result<()> {
             for i in 0..tabs_model.row_count() {
                 if let Some(mut row) = tabs_model.row_data(i) {
                     if row.id.as_str() == "welcome" {
+                        row.title_len = tab_title_len(&t("新标签页", "New tab"));
                         row.title = t("新标签页", "New tab").into();
                         tabs_model.set_row_data(i, row);
                     }
@@ -2898,6 +2908,7 @@ fn wire_session_callbacks(
             // Register tab + terminal state (SFTP fields start empty/loading).
             tabs_model.push(TabInfo {
                 id: tab_id.clone().into(),
+                title_len: tab_title_len(&tab_title),
                 title: tab_title.into(),
                 kind: "terminal".into(),
                 connected: false,
