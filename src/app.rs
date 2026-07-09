@@ -322,9 +322,11 @@ fn set_window_icon(window: &AppWindow) {
         .with_winit_window(|ww| ww.set_window_icon(Some(icon)));
 }
 
-/// On Windows 11, give the frameless window the native rounded corners (#166) and
-/// drop shadow (#162) it otherwise loses by drawing its own title bar. Harmless
-/// on Windows 10 (the corner attribute is ignored) and a no-op elsewhere.
+/// Give the frameless window native Windows 11 rounded corners (#166), then remove
+/// the invisible Win32 frame styles that winit keeps for undecorated windows. On
+/// Windows 10 those retained styles can leave a real top frame that Slint doesn't
+/// draw into, which makes rendered pixels and mouse coordinates disagree (#195).
+/// A no-op elsewhere.
 #[cfg(windows)]
 fn apply_window_chrome(window: &slint::Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -333,13 +335,6 @@ fn apply_window_chrome(window: &slint::Window) {
         let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
         let hwnd = h.hwnd.get();
 
-        #[repr(C)]
-        struct Margins {
-            left: i32,
-            right: i32,
-            top: i32,
-            bottom: i32,
-        }
         #[link(name = "dwmapi")]
         extern "system" {
             fn DwmSetWindowAttribute(
@@ -348,12 +343,12 @@ fn apply_window_chrome(window: &slint::Window) {
                 pv: *const core::ffi::c_void,
                 cb: u32,
             ) -> i32;
-            fn DwmExtendFrameIntoClientArea(hwnd: isize, margins: *const Margins) -> i32;
         }
-        // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2 (Windows 11+).
         const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
         const DWMWCP_ROUND: u32 = 2;
         unsafe {
+            // Rounded corners are a Windows 11 feature; the call quietly fails on
+            // older versions.
             let pref: u32 = DWMWCP_ROUND;
             let corner_hr = DwmSetWindowAttribute(
                 hwnd,
@@ -361,18 +356,9 @@ fn apply_window_chrome(window: &slint::Window) {
                 (&pref as *const u32).cast(),
                 4,
             );
-            // A borderless (WS_POPUP) window has no system shadow; extending the
-            // DWM frame by a hair brings it back. The margin renders as glass, but
-            // our opaque background paints over it — only the shadow shows.
-            let m = Margins {
-                left: 1,
-                right: 1,
-                top: 1,
-                bottom: 1,
-            };
-            let shadow_hr = DwmExtendFrameIntoClientArea(hwnd, &m);
+            let styles_changed = remove_invisible_frame_styles(hwnd);
             tracing::debug!(
-                "window chrome applied: hwnd={hwnd:#x} corner_hr={corner_hr:#x} shadow_hr={shadow_hr:#x}"
+                "window chrome: hwnd={hwnd:#x} corner_hr={corner_hr:#x} styles_changed={styles_changed}"
             );
         }
     });
@@ -380,6 +366,125 @@ fn apply_window_chrome(window: &slint::Window) {
 
 #[cfg(not(windows))]
 fn apply_window_chrome(_window: &slint::Window) {}
+
+#[cfg(windows)]
+fn schedule_window_chrome_fix<T>(weak: slint::Weak<T>)
+where
+    T: slint::ComponentHandle + 'static,
+{
+    for delay_ms in [0_u64, 16, 80] {
+        let weak2 = weak.clone();
+        slint::Timer::single_shot(std::time::Duration::from_millis(delay_ms), move || {
+            if let Some(w) = weak2.upgrade() {
+                apply_window_chrome(w.window());
+            }
+        });
+    }
+}
+
+#[cfg(not(windows))]
+fn schedule_window_chrome_fix<T>(_weak: slint::Weak<T>)
+where
+    T: slint::ComponentHandle + 'static,
+{
+}
+
+#[cfg(windows)]
+unsafe fn remove_invisible_frame_styles(hwnd: isize) -> bool {
+    const GWL_STYLE: i32 = -16;
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_CAPTION: isize = 0x00c0_0000;
+    const WS_BORDER: isize = 0x0080_0000;
+    const WS_SIZEBOX: isize = 0x0004_0000;
+    const WS_EX_DLGMODALFRAME: isize = 0x0000_0001;
+    const WS_EX_WINDOWEDGE: isize = 0x0000_0100;
+    const WS_EX_CLIENTEDGE: isize = 0x0000_0200;
+
+    let style = get_window_long_ptr(hwnd, GWL_STYLE);
+    let ex_style = get_window_long_ptr(hwnd, GWL_EXSTYLE);
+    let new_style = style & !(WS_CAPTION | WS_BORDER | WS_SIZEBOX);
+    let new_ex_style = ex_style & !(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME);
+    let changed = style != new_style || ex_style != new_ex_style;
+
+    if style != new_style {
+        set_window_long_ptr(hwnd, GWL_STYLE, new_style);
+    }
+    if ex_style != new_ex_style {
+        set_window_long_ptr(hwnd, GWL_EXSTYLE, new_ex_style);
+    }
+    if changed {
+        refresh_window_frame(hwnd);
+    }
+    changed
+}
+
+#[cfg(windows)]
+unsafe fn refresh_window_frame(hwnd: isize) {
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+    let ok = set_window_pos(
+        hwnd,
+        0,
+        0,
+        0,
+        0,
+        0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    if ok == 0 {
+        tracing::warn!("failed to refresh frameless window frame: hwnd={hwnd:#x}");
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    #[link_name = "GetWindowLongPtrW"]
+    fn get_window_long_ptr(hwnd: isize, index: i32) -> isize;
+    #[link_name = "SetWindowLongPtrW"]
+    fn set_window_long_ptr(hwnd: isize, index: i32, new_long: isize) -> isize;
+    #[link_name = "SetWindowPos"]
+    fn set_window_pos(
+        hwnd: isize,
+        hwnd_insert_after: isize,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        flags: u32,
+    ) -> i32;
+}
+
+/// Windows-only: install the winit backend before any Slint window is created so
+/// frameless windows are opaque OS windows and do not opt into winit's
+/// undecorated-shadow hack.
+#[cfg(windows)]
+fn setup_windows_platform() {
+    use i_slint_backend_winit::winit::platform::windows::WindowAttributesExtWindows;
+
+    let mut builder = i_slint_backend_winit::Backend::builder();
+    if let Ok(v) = std::env::var("SLINT_BACKEND") {
+        if let Some(r) = v.strip_prefix("winit-").filter(|r| !r.is_empty()) {
+            builder = builder.with_renderer_name(r.to_string());
+        }
+    }
+    builder = builder.with_window_attributes_hook(|attrs| {
+        attrs
+            .with_transparent(false)
+            .with_undecorated_shadow(false)
+    });
+    match builder.build() {
+        Ok(backend) => {
+            if slint::platform::set_platform(Box::new(backend)).is_err() {
+                tracing::warn!("winit backend already set; Windows chrome setup disabled");
+            }
+        }
+        Err(e) => tracing::warn!("winit backend build failed ({e}); Windows chrome setup disabled"),
+    }
+}
 
 fn clamp_window_size_to_monitor(window: &slint::Window, preferred: Option<(f32, f32)>) -> Option<(f32, f32)> {
     use i_slint_backend_winit::winit::dpi::{LogicalPosition, LogicalSize};
@@ -493,6 +598,11 @@ fn setup_macos_platform() {
 }
 
 pub fn run() -> Result<()> {
+    // Windows frameless-window attributes must be set before the first Slint
+    // window is created.
+    #[cfg(windows)]
+    setup_windows_platform();
+
     // Immersive native title bar on macOS (must precede the first window).
     #[cfg(target_os = "macos")]
     setup_macos_platform();
@@ -593,6 +703,28 @@ pub fn run() -> Result<()> {
                 schedule_slint_pointer_ungrab(weak.clone());
             }
         });
+    }
+    {
+        // Apply the same Windows frameless chrome fix to the detached process
+        // window, and refresh it after frame-affecting events.
+        use i_slint_backend_winit::winit::event::WindowEvent as WEvent;
+        use i_slint_backend_winit::EventResult;
+        let weak = proc_win.as_weak();
+        let mut chrome_done = false;
+        proc_win
+            .window()
+            .on_winit_window_event(move |_w, event| {
+                let needs_chrome = !chrome_done
+                    || matches!(
+                        event,
+                        WEvent::Resized(_) | WEvent::ScaleFactorChanged { .. }
+                    );
+                if needs_chrome {
+                    chrome_done = true;
+                    schedule_window_chrome_fix(weak.clone());
+                }
+                EventResult::Propagate
+            });
     }
     {
         // The sidebar "Processes" button shows / focuses the window.
@@ -1687,15 +1819,13 @@ pub fn run() -> Result<()> {
         let mut focused = true;
         let mut minimized = false;
         let mut occluded = false;
-        // Apply the Win11 rounded-corner + shadow chrome once, on the first event
-        // (the HWND reliably exists by then, unlike a pre-run timer) (#162/#166).
+        // Apply the native chrome correction once the HWND exists; resize and
+        // DPI events can make winit/Windows restore the invisible frame styles.
         let mut chrome_done = false;
         window.window().on_winit_window_event(move |_w, event| {
             if !chrome_done {
                 chrome_done = true;
-                if let Some(win) = weak.upgrade() {
-                    apply_window_chrome(win.window());
-                }
+                schedule_window_chrome_fix(weak.clone());
             }
             // Recompute window activity, push it to the shared cell, and update
             // Theme.window-focused (gates the cursor blink) (#127).
@@ -1753,6 +1883,10 @@ pub fn run() -> Result<()> {
                             .unwrap_or(false);
                         win.set_window_maximized(maxed);
                     }
+                    schedule_window_chrome_fix(weak.clone());
+                }
+                WEvent::ScaleFactorChanged { .. } => {
+                    schedule_window_chrome_fix(weak.clone());
                 }
                 WEvent::CloseRequested => {
                     // Confirm before closing if there are open session tabs (#88),
@@ -1808,6 +1942,7 @@ pub fn run() -> Result<()> {
                 if let Some(m) = now {
                     w.set_window_maximized(m);
                 }
+                schedule_window_chrome_fix(weak.clone());
             }
         });
     }
